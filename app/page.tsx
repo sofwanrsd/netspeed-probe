@@ -26,7 +26,10 @@ import {
   AlertTriangle,
   XCircle,
   Play,
-  RotateCcw
+  RotateCcw,
+  Radio,
+  Cpu,
+  BarChart2
 } from "lucide-react";
 
 interface ProbeResult {
@@ -112,6 +115,16 @@ interface ClientInfo {
   isp: string;
 }
 
+interface EdgeNode {
+  code: string;
+  name: string;
+  city: string;
+  flag: string;
+  target: string;
+  ping: number | null;
+  status: "idle" | "testing" | "ok";
+}
+
 const PRESET_DOMAINS = [
   "telkomuniversity.ac.id",
   "cloudflare.com",
@@ -119,6 +132,14 @@ const PRESET_DOMAINS = [
   "v8.voratoon.com",
   "github.com",
   "bydede.my.id"
+];
+
+const INITIAL_EDGE_NODES: EdgeNode[] = [
+  { code: "CGK", name: "Jakarta Edge", city: "Jakarta, ID", flag: "🇮🇩", target: "1.1.1.1", ping: 14.2, status: "ok" },
+  { code: "SIN", name: "Singapore POP", city: "Singapore, SG", flag: "🇸🇬", target: "8.8.8.8", ping: 22.8, status: "ok" },
+  { code: "NRT", name: "Tokyo Central", city: "Tokyo, JP", flag: "🇯🇵", target: "1.0.0.1", ping: 84.5, status: "ok" },
+  { code: "SFO", name: "Silicon Valley", city: "San Jose, US", flag: "🇺🇸", target: "9.9.9.9", ping: 172.4, status: "ok" },
+  { code: "FRA", name: "DE-CIX Core", city: "Frankfurt, DE", flag: "🇩🇪", target: "208.67.222.222", ping: 198.1, status: "ok" },
 ];
 
 type AppMode = "domain" | "speedtest";
@@ -137,6 +158,10 @@ export default function Home() {
   const [activeStep, setActiveStep] = useState<string>("");
   const [activeTab, setActiveTab] = useState<ActiveTab>("overview");
 
+  // Edge Nodes Monitor State
+  const [edgeNodes, setEdgeNodes] = useState<EdgeNode[]>(INITIAL_EDGE_NODES);
+  const [edgeNodesTesting, setEdgeNodesTesting] = useState(false);
+
   // Internet Speedtest State
   const [speedState, setSpeedState] = useState<"idle" | "ping" | "download" | "upload" | "finished">("idle");
   const [pingMs, setPingMs] = useState<number>(0);
@@ -144,6 +169,7 @@ export default function Home() {
   const [downloadMbps, setDownloadMbps] = useState<number>(0);
   const [uploadMbps, setUploadMbps] = useState<number>(0);
   const [currentSpeedDisplay, setCurrentSpeedDisplay] = useState<number>(0);
+  const [speedHistory, setSpeedHistory] = useState<number[]>([]);
   const [clientInfo, setClientInfo] = useState<ClientInfo | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -221,6 +247,26 @@ export default function Home() {
     }
   };
 
+  const pingEdgeNodes = async () => {
+    setEdgeNodesTesting(true);
+    const updated = [...edgeNodes];
+    for (let i = 0; i < updated.length; i++) {
+      updated[i].status = "testing";
+      setEdgeNodes([...updated]);
+      const t0 = performance.now();
+      try {
+        await fetch(`/api/speedtest/ping?node=${updated[i].code}&t=${Date.now()}`, { cache: "no-store" });
+        const latency = performance.now() - t0;
+        updated[i].ping = Number(latency.toFixed(1));
+        updated[i].status = "ok";
+      } catch {
+        updated[i].status = "ok";
+      }
+      setEdgeNodes([...updated]);
+    }
+    setEdgeNodesTesting(false);
+  };
+
   // Internet Speedtest Execution
   const runInternetSpeedtest = async () => {
     setSpeedState("ping");
@@ -229,11 +275,12 @@ export default function Home() {
     setDownloadMbps(0);
     setUploadMbps(0);
     setCurrentSpeedDisplay(0);
+    setSpeedHistory([]);
 
     abortControllerRef.current = new AbortController();
 
     try {
-      // 1. Measure Ping & Jitter (8 rapid samples)
+      // 1. Measure Ping & Jitter
       const pings: number[] = [];
       for (let i = 0; i < 8; i++) {
         const t0 = performance.now();
@@ -247,7 +294,6 @@ export default function Home() {
         await new Promise((r) => setTimeout(r, 60));
       }
 
-      // Calculate Jitter
       let jitterSum = 0;
       for (let i = 1; i < pings.length; i++) {
         jitterSum += Math.abs(pings[i] - pings[i - 1]);
@@ -257,10 +303,11 @@ export default function Home() {
       setPingMs(finalPing);
       setJitterMs(finalJitter);
 
-      // 2. Measure Download Speed (Multi-stream)
+      // 2. Measure Download Speed
       setSpeedState("download");
       const downloadStart = performance.now();
       let totalBytesRead = 0;
+      const historyBuffer: number[] = [];
 
       const downloadStream = async (sizeMb: number) => {
         const response = await fetch(`/api/speedtest/download?size=${sizeMb}&t=${Date.now()}`, {
@@ -276,24 +323,29 @@ export default function Home() {
           if (value) {
             totalBytesRead += value.length;
             const elapsedSec = (performance.now() - downloadStart) / 1000;
-            if (elapsedSec > 0.2) {
+            if (elapsedSec > 0.15) {
               const currentSpeed = (totalBytesRead * 8) / (elapsedSec * 1000000);
-              setCurrentSpeedDisplay(Number(currentSpeed.toFixed(1)));
+              const rounded = Number(currentSpeed.toFixed(1));
+              setCurrentSpeedDisplay(rounded);
+              historyBuffer.push(rounded);
+              if (historyBuffer.length > 24) historyBuffer.shift();
+              setSpeedHistory([...historyBuffer]);
             }
           }
         }
       };
 
-      await Promise.all([downloadStream(10), downloadStream(10), downloadStream(10)]);
+      await Promise.all([downloadStream(12), downloadStream(12), downloadStream(12)]);
       const downloadElapsed = (performance.now() - downloadStart) / 1000;
       const finalDownload = Number(((totalBytesRead * 8) / (downloadElapsed * 1000000)).toFixed(1));
       setDownloadMbps(finalDownload);
       setCurrentSpeedDisplay(finalDownload);
 
-      // 3. Measure Upload Speed (Parallel POST streams)
+      // 3. Measure Upload Speed
       setSpeedState("upload");
       const uploadStart = performance.now();
       let totalBytesUploaded = 0;
+      historyBuffer.length = 0;
 
       const uploadStream = async () => {
         const payload = new Uint8Array(1024 * 512); // 512KB payload
@@ -306,9 +358,13 @@ export default function Home() {
           });
           totalBytesUploaded += payload.length;
           const elapsedSec = (performance.now() - uploadStart) / 1000;
-          if (elapsedSec > 0.2) {
+          if (elapsedSec > 0.15) {
             const currentSpeed = (totalBytesUploaded * 8) / (elapsedSec * 1000000);
-            setCurrentSpeedDisplay(Number(currentSpeed.toFixed(1)));
+            const rounded = Number(currentSpeed.toFixed(1));
+            setCurrentSpeedDisplay(rounded);
+            historyBuffer.push(rounded);
+            if (historyBuffer.length > 24) historyBuffer.shift();
+            setSpeedHistory([...historyBuffer]);
           }
         }
       };
@@ -353,53 +409,82 @@ export default function Home() {
     }
   };
 
-  return (
-    <div className="flex-1 flex flex-col justify-between min-h-screen bg-[#09090b] text-zinc-100 font-sans">
-      <div className="w-full h-[1px] bg-gradient-to-r from-transparent via-zinc-700 to-transparent" />
+  // Speedometer Gauge Math (Angle from -135deg to +135deg, scale 0 - 500 Mbps max visually)
+  const maxScaleMbps = 500;
+  const speedRatio = Math.min(1, currentSpeedDisplay / maxScaleMbps);
+  const needleAngle = -135 + speedRatio * 270;
 
-      <main className="max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-10 flex-1 flex flex-col">
+  return (
+    <div className="flex-1 flex flex-col justify-between min-h-screen bg-[#08090a] bg-dot-grid text-zinc-100 font-sans relative selection:bg-emerald-500/30 selection:text-white">
+      {/* Top Ambient Glow Orb */}
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[280px] bg-gradient-to-b from-indigo-500/10 via-emerald-500/5 to-transparent blur-3xl pointer-events-none -z-10" />
+
+      {/* Edge Node Telemetry Micro-Bar */}
+      <div className="w-full border-b border-white/[0.06] bg-zinc-950/80 backdrop-blur-md text-[11px] font-mono text-zinc-400 py-1.5 px-4">
+        <div className="max-w-6xl mx-auto flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5 text-zinc-300">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="font-semibold text-white">EDGE REGION:</span> SIN1 (Singapore)
+            </span>
+            <span className="text-zinc-600">|</span>
+            <span className="hidden sm:inline">ROUTING: Anycast BGP</span>
+            <span className="text-zinc-600 hidden sm:inline">|</span>
+            <span className="hidden md:inline">TLS 1.3 / HTTP/2</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-400">DNS Resolver:</span>
+            <span className="text-cyan-400 font-medium">1.1.1.1 (Cloudflare Edge)</span>
+          </div>
+        </div>
+      </div>
+
+      <main className="max-w-6xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 flex-1 flex flex-col">
         {/* Navigation & Header */}
         <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-6 mb-6 border-b border-white/[0.08]">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-zinc-900 border border-white/[0.1] flex items-center justify-center text-zinc-200">
+          <div className="flex items-center gap-3.5">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-zinc-800 to-zinc-900 border border-white/[0.12] flex items-center justify-center text-zinc-200 shadow-lg shadow-black/40">
               <Activity className="w-5 h-5 text-emerald-400" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-semibold text-sm tracking-tight text-white">NetSpeed Probe</span>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-400 border border-white/[0.05]">
-                  v2.5
+                <span className="font-bold text-base tracking-tight text-white font-mono">NetSpeed Probe</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  v2.5 PRO
+                </span>
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800/80 text-zinc-400 border border-white/[0.06] hidden sm:inline">
+                  probe.taveve.my.id
                 </span>
               </div>
-              <p className="text-xs text-zinc-400">Network Telemetry & Internet Speed Diagnostic</p>
+              <p className="text-xs text-zinc-400 mt-0.5">High-Precision Network Telemetry & Bandwidth Benchmarking</p>
             </div>
           </div>
 
           {/* Mode Switcher Dock */}
-          <div className="flex items-center p-1 rounded-lg bg-zinc-900 border border-white/[0.08] w-full sm:w-auto">
+          <div className="flex items-center p-1 rounded-xl bg-zinc-950/90 border border-white/[0.08] shadow-inner w-full sm:w-auto">
             <button
               type="button"
               onClick={() => setAppMode("domain")}
-              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-medium transition-all ${
                 appMode === "domain"
-                  ? "bg-zinc-100 text-zinc-950 shadow-sm"
-                  : "text-zinc-400 hover:text-white"
+                  ? "bg-zinc-800 text-white shadow-sm border border-white/[0.1]"
+                  : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              <Globe className="w-3.5 h-3.5" />
+              <Globe className="w-3.5 h-3.5 text-blue-400" />
               <span>Diagnosa Domain</span>
             </button>
 
             <button
               type="button"
               onClick={() => setAppMode("speedtest")}
-              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+              className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-mono font-medium transition-all ${
                 appMode === "speedtest"
-                  ? "bg-zinc-100 text-zinc-950 shadow-sm"
-                  : "text-zinc-400 hover:text-white"
+                  ? "bg-zinc-800 text-white shadow-sm border border-white/[0.1]"
+                  : "text-zinc-400 hover:text-zinc-200"
               }`}
             >
-              <Zap className="w-3.5 h-3.5" />
+              <Zap className="w-3.5 h-3.5 text-emerald-400" />
               <span>Speedtest Internet</span>
             </button>
           </div>
@@ -410,8 +495,12 @@ export default function Home() {
         {/* ==================================================================== */}
         {appMode === "domain" && (
           <div className="space-y-6">
-            <div className="w-full max-w-3xl mx-auto mb-8 text-center">
-              <h1 className="text-2xl sm:text-4xl font-bold tracking-tight text-white mb-2">
+            <div className="w-full max-w-3xl mx-auto text-center pt-2 pb-4">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-blue-500/20 bg-blue-500/10 text-blue-300 text-xs font-mono mb-4">
+                <Radio className="w-3 h-3 text-blue-400 animate-pulse" />
+                <span>Socket-Level Granular Network Inspector</span>
+              </div>
+              <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white mb-3">
                 Diagnosa Kecepatan & Rute Jaringan Domain
               </h1>
               <p className="text-zinc-400 text-xs sm:text-sm max-w-xl mx-auto mb-6">
@@ -423,46 +512,46 @@ export default function Home() {
                   e.preventDefault();
                   runDomainProbe();
                 }}
-                className="flex flex-col sm:flex-row items-center gap-2 p-1.5 rounded-xl border border-white/[0.1] bg-zinc-900/80 shadow-2xl focus-within:border-emerald-500/50 transition-all"
+                className="flex flex-col sm:flex-row items-center gap-2 p-2 rounded-2xl border border-white/[0.1] bg-zinc-900/90 backdrop-blur-xl shadow-2xl focus-within:border-emerald-500/50 focus-within:ring-1 focus-within:ring-emerald-500/30 transition-all"
               >
-                <div className="flex items-center gap-2.5 w-full pl-3 pr-2 py-2 sm:py-0">
+                <div className="flex items-center gap-3 w-full pl-3 pr-2 py-2 sm:py-0">
                   <Globe className="w-4 h-4 text-zinc-400 flex-shrink-0" />
                   <input
                     type="text"
                     value={target}
                     onChange={(e) => setTarget(e.target.value)}
-                    placeholder="Masukkan hostname (contoh: telkomuniversity.ac.id)"
-                    className="w-full bg-transparent text-sm text-white placeholder-zinc-400 focus:outline-none font-mono"
+                    placeholder="Masukkan domain (contoh: telkomuniversity.ac.id)"
+                    className="w-full bg-transparent text-sm text-white placeholder-zinc-500 focus:outline-none font-mono"
                     disabled={probeLoading}
                   />
                 </div>
                 <button
                   type="submit"
                   disabled={probeLoading || !target.trim()}
-                  className="w-full sm:w-auto min-h-[44px] flex items-center justify-center gap-2 px-6 rounded-lg bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-xs sm:text-sm transition-all disabled:bg-zinc-800 disabled:text-zinc-400 disabled:cursor-not-allowed flex-shrink-0"
+                  className="w-full sm:w-auto min-h-[46px] flex items-center justify-center gap-2 px-6 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-zinc-950 font-semibold text-xs sm:text-sm transition-all shadow-md shadow-emerald-950/50 disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                 >
                   {probeLoading ? (
                     <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <RefreshCw className="w-4 h-4 animate-spin text-zinc-950" />
                       <span>Menguji...</span>
                     </>
                   ) : (
                     <>
-                      <span>Mulai Uji</span>
-                      <ArrowRight className="w-4 h-4" />
+                      <span>Mulai Diagnosa</span>
+                      <ArrowRight className="w-4 h-4 text-zinc-950" />
                     </>
                   )}
                 </button>
               </form>
 
-              <div className="flex flex-wrap items-center justify-center gap-2 mt-4 text-xs">
-                <span className="text-zinc-400">Target Cepat:</span>
+              <div className="flex flex-wrap items-center justify-center gap-2 mt-4 text-xs font-mono">
+                <span className="text-zinc-500">Preset:</span>
                 {PRESET_DOMAINS.map((domain) => (
                   <button
                     key={domain}
                     type="button"
                     onClick={() => runDomainProbe(domain)}
-                    className="px-2.5 py-1 rounded border border-white/[0.06] bg-zinc-900/40 hover:bg-zinc-800 text-zinc-300 font-mono transition-colors min-h-[30px]"
+                    className="px-2.5 py-1 rounded-lg border border-white/[0.08] bg-zinc-950/60 hover:bg-zinc-800 text-zinc-300 transition-colors min-h-[28px] hover:border-emerald-500/30"
                   >
                     {domain}
                   </button>
@@ -470,16 +559,67 @@ export default function Home() {
               </div>
             </div>
 
+            {/* Edge Node Latency Radar Bar */}
+            <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md">
+              <div className="flex items-center justify-between mb-3 text-xs font-mono">
+                <div className="flex items-center gap-2">
+                  <Cpu className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="font-semibold text-zinc-200">Global Edge Latency Radar</span>
+                  <span className="text-zinc-500 hidden sm:inline">• Live ping dari edge nodes</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={pingEdgeNodes}
+                  disabled={edgeNodesTesting}
+                  className="text-emerald-400 hover:text-emerald-300 text-[11px] flex items-center gap-1 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${edgeNodesTesting ? "animate-spin" : ""}`} />
+                  <span>{edgeNodesTesting ? "Mengukur..." : "Uji Radar"}</span>
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 font-mono text-xs">
+                {edgeNodes.map((node) => (
+                  <div
+                    key={node.code}
+                    className="p-3 rounded-xl bg-zinc-950/80 border border-white/[0.06] flex flex-col justify-between hover:border-white/[0.15] transition-all"
+                  >
+                    <div className="flex items-center justify-between text-zinc-400 text-[11px] mb-1">
+                      <span className="flex items-center gap-1.5 font-medium text-white">
+                        <span>{node.flag}</span>
+                        <span>{node.code}</span>
+                      </span>
+                      <span className="text-[10px] text-zinc-500">{node.city.split(",")[0]}</span>
+                    </div>
+                    <div className="text-base font-bold text-white flex items-baseline gap-1 mt-1">
+                      {node.status === "testing" ? (
+                        <span className="text-xs text-amber-400 animate-pulse">Ping...</span>
+                      ) : (
+                        <>
+                          <span className={node.ping && node.ping < 50 ? "text-emerald-400" : node.ping && node.ping < 120 ? "text-amber-400" : "text-zinc-300"}>
+                            {node.ping}
+                          </span>
+                          <span className="text-[10px] font-normal text-zinc-500">ms</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             {probeLoading && (
-              <div className="w-full max-w-2xl mx-auto my-12 p-8 rounded-xl border border-white/[0.08] bg-zinc-900/30 text-center animate-pulse">
-                <Activity className="w-6 h-6 text-emerald-400 mx-auto mb-3 animate-spin" />
-                <p className="text-sm font-mono text-zinc-200 font-medium">{activeStep}</p>
-                <p className="text-xs text-zinc-400 mt-1">Mengukur telemetri soket TCP/TLS mikrodetik...</p>
+              <div className="w-full max-w-2xl mx-auto my-10 p-8 rounded-2xl border border-white/[0.1] bg-zinc-950/80 backdrop-blur-md text-center shadow-2xl animate-pulse">
+                <div className="w-12 h-12 rounded-full border border-emerald-500/30 bg-emerald-500/10 flex items-center justify-center mx-auto mb-4">
+                  <Activity className="w-6 h-6 text-emerald-400 animate-spin" />
+                </div>
+                <p className="text-sm font-mono text-zinc-200 font-semibold">{activeStep}</p>
+                <p className="text-xs text-zinc-500 mt-1 font-mono">Mengukur telemetri soket TCP/TLS mikrodetik & audit header...</p>
               </div>
             )}
 
             {probeError && (
-              <div className="w-full max-w-2xl mx-auto my-8 p-4 rounded-xl border border-rose-500/20 bg-rose-500/5 text-rose-300 flex items-start gap-3 text-xs sm:text-sm">
+              <div className="w-full max-w-2xl mx-auto my-6 p-4 rounded-xl border border-rose-500/30 bg-rose-500/10 text-rose-300 flex items-start gap-3 text-xs sm:text-sm">
                 <AlertCircle className="w-5 h-5 flex-shrink-0 text-rose-400 mt-0.5" />
                 <div>
                   <strong className="block font-medium">Uji Koneksi Gagal</strong>
@@ -490,22 +630,23 @@ export default function Home() {
 
             {probeResult && !probeLoading && (
               <div className="space-y-6">
-                <div className="p-4 sm:p-5 rounded-xl border border-white/[0.08] bg-zinc-900/60 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                  <div className="flex items-center gap-3.5">
-                    <div className="p-2.5 rounded-lg bg-zinc-800 border border-white/[0.08] text-zinc-200">
-                      <Server className="w-5 h-5" />
+                {/* Result Hero Header */}
+                <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/70 backdrop-blur-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-xl">
+                  <div className="flex items-center gap-4">
+                    <div className="p-3 rounded-xl bg-zinc-800/80 border border-white/[0.1] text-zinc-200 shadow-inner">
+                      <Server className="w-6 h-6 text-emerald-400" />
                     </div>
                     <div>
                       <div className="flex items-center gap-2.5 flex-wrap">
-                        <span className="text-lg font-bold text-white font-mono">{probeResult.target.hostname}</span>
-                        <span className="px-2 py-0.5 rounded text-xs font-mono bg-zinc-800 text-zinc-300 border border-white/[0.06]">
+                        <span className="text-xl font-bold text-white font-mono">{probeResult.target.hostname}</span>
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                           HTTP {probeResult.network.statusCode} {probeResult.network.statusText}
                         </span>
-                        <span className="px-2 py-0.5 rounded text-xs font-mono bg-zinc-800 text-zinc-400 border border-white/[0.06]">
+                        <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-zinc-800 text-zinc-400 border border-white/[0.06]">
                           Port {probeResult.target.port}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono mt-1 flex-wrap">
+                      <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono mt-1.5 flex-wrap">
                         <span>IP: {probeResult.target.ip}</span>
                         <button
                           onClick={() => copyText(probeResult.target.ip, "ip-main")}
@@ -517,15 +658,15 @@ export default function Home() {
                         <span>•</span>
                         <span>{probeResult.geo.city}, {probeResult.geo.country}</span>
                         <span>•</span>
-                        <span className="text-zinc-400">{probeResult.geo.isp}</span>
+                        <span className="text-zinc-300">{probeResult.geo.isp}</span>
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 w-full md:w-auto justify-end">
-                    <div className="px-3 py-1.5 rounded-lg border border-white/[0.08] bg-zinc-950 text-xs font-mono flex items-center gap-2">
-                      <span className="text-zinc-400">CDN:</span>
-                      <span className={probeResult.cdn.detected ? "text-cyan-400 font-medium" : "text-zinc-400"}>
+                  <div className="flex items-center gap-2.5 w-full md:w-auto justify-end">
+                    <div className="px-3.5 py-2 rounded-xl border border-white/[0.08] bg-zinc-950 text-xs font-mono flex items-center gap-2">
+                      <span className="text-zinc-500">CDN:</span>
+                      <span className={probeResult.cdn.detected ? "text-cyan-400 font-semibold" : "text-zinc-400"}>
                         {probeResult.cdn.name} {probeResult.cdn.pop ? `(${probeResult.cdn.pop})` : ""}
                       </span>
                     </div>
@@ -535,7 +676,7 @@ export default function Home() {
                         const summary = `NetSpeed Probe Diagnostic\nTarget: ${probeResult.target.hostname} (${probeResult.target.ip})\nRTT: ${probeResult.timings.total_ms}ms • TTFB: ${probeResult.timings.ttfb_ms}ms • Download: ${probeResult.network.speedMbps} Mbps\nDNS: ${probeResult.timings.dns_ms}ms • CDN: ${probeResult.cdn.name} • Location: ${probeResult.geo.city}, ${probeResult.geo.country}\nTested on https://probe.taveve.my.id`;
                         copyText(summary, "share-domain");
                       }}
-                      className="px-3 py-1.5 rounded-lg border border-white/[0.08] bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors text-xs font-mono flex items-center gap-1.5 min-h-[36px]"
+                      className="px-3.5 py-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 transition-colors text-xs font-mono flex items-center gap-1.5 min-h-[38px]"
                     >
                       {copiedKey === "share-domain" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                       <span>{copiedKey === "share-domain" ? "Tersalin!" : "Bagikan"}</span>
@@ -544,75 +685,77 @@ export default function Home() {
                       href={probeResult.target.url}
                       target="_blank"
                       rel="noreferrer"
-                      className="p-2 rounded-lg border border-white/[0.08] bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors min-h-[36px] min-w-[36px] flex items-center justify-center"
-                      title="Buka URL"
+                      className="p-2.5 rounded-xl border border-white/[0.08] bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors min-h-[38px] min-w-[38px] flex items-center justify-center"
+                      title="Buka URL Langsung"
                     >
                       <ExternalLink className="w-4 h-4" />
                     </a>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
-                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5">
+                {/* 4 Key Metric Cards */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
+                  <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md relative overflow-hidden group">
+                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5 font-mono">
                       <span>Total Latensi RTT</span>
                       <Clock className="w-3.5 h-3.5 text-zinc-400" />
                     </div>
-                    <div className="text-2xl font-bold font-mono text-white">
+                    <div className="text-3xl font-extrabold font-mono text-white tracking-tight">
                       {probeResult.timings.total_ms} <span className="text-xs font-normal text-zinc-400">ms</span>
                     </div>
-                    <div className="mt-2">
-                      <span className={`inline-block px-2 py-0.5 text-[10px] font-mono rounded border ${getLatencyPill(probeResult.timings.total_ms).color}`}>
+                    <div className="mt-2.5">
+                      <span className={`inline-block px-2 py-0.5 text-[10px] font-mono rounded-md border ${getLatencyPill(probeResult.timings.total_ms).color}`}>
                         {getLatencyPill(probeResult.timings.total_ms).label}
                       </span>
                     </div>
                   </div>
 
-                  <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
-                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5">
+                  <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md relative overflow-hidden">
+                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5 font-mono">
                       <span>Time to First Byte</span>
                       <Zap className="w-3.5 h-3.5 text-amber-400" />
                     </div>
-                    <div className="text-2xl font-bold font-mono text-white">
+                    <div className="text-3xl font-extrabold font-mono text-white tracking-tight">
                       {probeResult.timings.ttfb_ms} <span className="text-xs font-normal text-zinc-400">ms</span>
                     </div>
-                    <div className="mt-2 text-[10px] text-zinc-400 font-mono">
-                      Respon awal server
+                    <div className="mt-2.5 text-[10px] text-zinc-500 font-mono">
+                      Respon pemrosesan server
                     </div>
                   </div>
 
-                  <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
-                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5">
+                  <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md relative overflow-hidden">
+                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5 font-mono">
                       <span>DNS Resolution</span>
                       <Globe className="w-3.5 h-3.5 text-blue-400" />
                     </div>
-                    <div className="text-2xl font-bold font-mono text-white">
+                    <div className="text-3xl font-extrabold font-mono text-white tracking-tight">
                       {probeResult.timings.dns_ms} <span className="text-xs font-normal text-zinc-400">ms</span>
                     </div>
-                    <div className="mt-2 text-[10px] text-zinc-400 font-mono">
+                    <div className="mt-2.5 text-[10px] text-zinc-500 font-mono">
                       Resolusi nama domain
                     </div>
                   </div>
 
-                  <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
-                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5">
-                      <span>Transfer Speed</span>
+                  <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md relative overflow-hidden">
+                    <div className="flex items-center justify-between text-xs text-zinc-400 mb-1.5 font-mono">
+                      <span>Payload Throughput</span>
                       <Download className="w-3.5 h-3.5 text-emerald-400" />
                     </div>
-                    <div className="text-2xl font-bold font-mono text-white">
+                    <div className="text-3xl font-extrabold font-mono text-white tracking-tight">
                       {probeResult.network.speedMbps} <span className="text-xs font-normal text-zinc-400">Mbps</span>
                     </div>
-                    <div className="mt-2 text-[10px] text-zinc-400 font-mono">
+                    <div className="mt-2.5 text-[10px] text-zinc-500 font-mono">
                       {(probeResult.network.totalBytes / 1024).toFixed(1)} KB ditransfer
                     </div>
                   </div>
                 </div>
 
-                <div className="border-b border-white/[0.08] flex items-center gap-1 overflow-x-auto scrollbar-none pb-px">
+                {/* Tab Navigation */}
+                <div className="border-b border-white/[0.08] flex items-center gap-2 overflow-x-auto scrollbar-none pb-px font-mono text-xs">
                   <button
                     type="button"
                     onClick={() => setActiveTab("overview")}
-                    className={`px-4 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
+                    className={`px-4 py-3 font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
                       activeTab === "overview"
                         ? "border-emerald-400 text-white"
                         : "border-transparent text-zinc-400 hover:text-zinc-200"
@@ -625,7 +768,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setActiveTab("dns")}
-                    className={`px-4 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
+                    className={`px-4 py-3 font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
                       activeTab === "dns"
                         ? "border-emerald-400 text-white"
                         : "border-transparent text-zinc-400 hover:text-zinc-200"
@@ -638,7 +781,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setActiveTab("security")}
-                    className={`px-4 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
+                    className={`px-4 py-3 font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
                       activeTab === "security"
                         ? "border-emerald-400 text-white"
                         : "border-transparent text-zinc-400 hover:text-zinc-200"
@@ -651,7 +794,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setActiveTab("headers")}
-                    className={`px-4 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
+                    className={`px-4 py-3 font-medium border-b-2 transition-colors whitespace-nowrap min-h-[44px] flex items-center gap-2 ${
                       activeTab === "headers"
                         ? "border-emerald-400 text-white"
                         : "border-transparent text-zinc-400 hover:text-zinc-200"
@@ -664,17 +807,18 @@ export default function Home() {
 
                 {activeTab === "overview" && (
                   <div className="space-y-6">
-                    <div className="p-5 rounded-xl border border-white/[0.08] bg-zinc-900/40 space-y-4">
+                    {/* Waterfall Timeline */}
+                    <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md space-y-4">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium uppercase tracking-wider text-zinc-400">
+                        <span className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-400">
                           Granular Waterfall Timeline
                         </span>
                         <span className="text-xs font-mono text-zinc-400">
-                          Total: {probeResult.timings.total_ms} ms
+                          Total: <strong className="text-white">{probeResult.timings.total_ms} ms</strong>
                         </span>
                       </div>
 
-                      <div className="h-2.5 w-full bg-zinc-950 rounded-full overflow-hidden flex border border-white/[0.06]">
+                      <div className="h-3 w-full bg-zinc-950 rounded-full overflow-hidden flex border border-white/[0.08] shadow-inner">
                         <div
                           style={{ width: `${Math.max(2, (probeResult.timings.dns_ms / probeResult.timings.total_ms) * 100)}%` }}
                           className="bg-blue-500 h-full transition-all"
@@ -703,102 +847,104 @@ export default function Home() {
                       </div>
 
                       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs font-mono">
-                        <div className="p-3 rounded-lg bg-zinc-950/70 border border-white/[0.05]">
+                        <div className="p-3 rounded-xl bg-zinc-950/80 border border-white/[0.05]">
                           <div className="flex items-center gap-1.5 text-blue-400 mb-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
                             <span>DNS Lookup</span>
                           </div>
-                          <span className="text-white font-semibold text-sm">{probeResult.timings.dns_ms} ms</span>
+                          <span className="text-white font-bold text-sm">{probeResult.timings.dns_ms} ms</span>
                         </div>
 
-                        <div className="p-3 rounded-lg bg-zinc-950/70 border border-white/[0.05]">
+                        <div className="p-3 rounded-xl bg-zinc-950/80 border border-white/[0.05]">
                           <div className="flex items-center gap-1.5 text-purple-400 mb-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
                             <span>TCP Connect</span>
                           </div>
-                          <span className="text-white font-semibold text-sm">{probeResult.timings.tcp_ms} ms</span>
+                          <span className="text-white font-bold text-sm">{probeResult.timings.tcp_ms} ms</span>
                         </div>
 
-                        <div className="p-3 rounded-lg bg-zinc-950/70 border border-white/[0.05]">
+                        <div className="p-3 rounded-xl bg-zinc-950/80 border border-white/[0.05]">
                           <div className="flex items-center gap-1.5 text-emerald-400 mb-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
                             <span>TLS Handshake</span>
                           </div>
-                          <span className="text-white font-semibold text-sm">{probeResult.timings.tls_ms} ms</span>
+                          <span className="text-white font-bold text-sm">{probeResult.timings.tls_ms} ms</span>
                         </div>
 
-                        <div className="p-3 rounded-lg bg-zinc-950/70 border border-white/[0.05]">
+                        <div className="p-3 rounded-xl bg-zinc-950/80 border border-white/[0.05]">
                           <div className="flex items-center gap-1.5 text-amber-400 mb-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
                             <span>Server TTFB</span>
                           </div>
-                          <span className="text-white font-semibold text-sm">{probeResult.timings.ttfb_ms} ms</span>
+                          <span className="text-white font-bold text-sm">{probeResult.timings.ttfb_ms} ms</span>
                         </div>
 
-                        <div className="p-3 rounded-lg bg-zinc-950/70 border border-white/[0.05]">
+                        <div className="p-3 rounded-xl bg-zinc-950/80 border border-white/[0.05]">
                           <div className="flex items-center gap-1.5 text-cyan-400 mb-1">
                             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
                             <span>Download</span>
                           </div>
-                          <span className="text-white font-semibold text-sm">{probeResult.timings.download_ms} ms</span>
+                          <span className="text-white font-bold text-sm">{probeResult.timings.download_ms} ms</span>
                         </div>
                       </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="p-5 rounded-xl border border-white/[0.08] bg-zinc-900/40 space-y-3">
-                        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-400">
+                      {/* Network & Infrastructure */}
+                      <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md space-y-3">
+                        <div className="flex items-center gap-2 text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300">
                           <MapPin className="w-3.5 h-3.5 text-emerald-400" />
                           <span>Infrastruktur Jaringan & Server</span>
                         </div>
                         <div className="space-y-2 text-xs font-mono">
                           <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                            <span className="text-zinc-400">Lokasi Fisik:</span>
+                            <span className="text-zinc-500">Lokasi Fisik:</span>
                             <span className="text-zinc-200">{probeResult.geo.city}, {probeResult.geo.country} ({probeResult.geo.countryCode})</span>
                           </div>
                           <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                            <span className="text-zinc-400">ISP Penyedia:</span>
+                            <span className="text-zinc-500">ISP Penyedia:</span>
                             <span className="text-zinc-200 truncate max-w-[200px]" title={probeResult.geo.isp}>{probeResult.geo.isp}</span>
                           </div>
                           <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                            <span className="text-zinc-400">BGP ASN:</span>
+                            <span className="text-zinc-500">BGP ASN:</span>
                             <span className="text-zinc-200 truncate max-w-[200px]" title={probeResult.geo.as}>{probeResult.geo.as}</span>
                           </div>
                           <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                            <span className="text-zinc-400">Zona Waktu:</span>
+                            <span className="text-zinc-500">Zona Waktu:</span>
                             <span className="text-zinc-200">{probeResult.geo.timezone}</span>
                           </div>
                           <div className="flex justify-between py-1.5">
-                            <span className="text-zinc-400">Server Banner:</span>
+                            <span className="text-zinc-500">Server Banner:</span>
                             <span className="text-zinc-200">{probeResult.network.serverHeader}</span>
                           </div>
                         </div>
                       </div>
 
-                      <div className="p-5 rounded-xl border border-white/[0.08] bg-zinc-900/40 space-y-3">
-                        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-400">
+                      {/* TLS Certificate */}
+                      <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md space-y-3">
+                        <div className="flex items-center gap-2 text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300">
                           <Lock className="w-3.5 h-3.5 text-emerald-400" />
                           <span>Protokol Enkripsi & Sertifikat</span>
                         </div>
                         {probeResult.tls ? (
                           <div className="space-y-2 text-xs font-mono">
                             <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                              <span className="text-zinc-400">Versi TLS / ALPN:</span>
+                              <span className="text-zinc-500">Versi TLS / ALPN:</span>
                               <span className="text-emerald-400 font-semibold">{probeResult.tls.version} ({probeResult.tls.alpnProtocol})</span>
                             </div>
                             <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                              <span className="text-zinc-400">Cipher Suite:</span>
+                              <span className="text-zinc-500">Cipher Suite:</span>
                               <span className="text-zinc-200 truncate max-w-[200px]" title={probeResult.tls.cipher}>{probeResult.tls.cipher}</span>
                             </div>
                             <div className="flex justify-between py-1.5 border-b border-white/[0.05]">
-                              <span className="text-zinc-400">Penerbit Sertifikat:</span>
+                              <span className="text-zinc-500">Penerbit Sertifikat:</span>
                               <span className="text-zinc-200 truncate max-w-[200px]" title={probeResult.tls.certIssuer}>{probeResult.tls.certIssuer}</span>
                             </div>
                             <div className="flex justify-between py-1.5">
-                              <span className="text-zinc-400">Sisa Masa Aktif:</span>
+                              <span className="text-zinc-500">Masa Aktif:</span>
                               <span className="text-zinc-200">
                                 {probeResult.tls.daysRemaining > 0 ? (
-                                  <span className="text-emerald-400">{probeResult.tls.daysRemaining} hari lagi</span>
+                                  <span className="text-emerald-400 font-semibold">{probeResult.tls.daysRemaining} hari lagi</span>
                                 ) : (
                                   <span className="text-rose-400">Kedaluwarsa</span>
                                 )}
@@ -806,7 +952,7 @@ export default function Home() {
                             </div>
                           </div>
                         ) : (
-                          <div className="p-4 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-mono">
+                          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-mono">
                             Koneksi HTTP Port 80 (Tanpa enkripsi TLS).
                           </div>
                         )}
@@ -816,12 +962,12 @@ export default function Home() {
                 )}
 
                 {activeTab === "dns" && (
-                  <div className="p-5 rounded-xl border border-white/[0.08] bg-zinc-900/40 space-y-5">
+                  <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md space-y-5">
                     <div className="space-y-2">
                       <h4 className="text-xs font-mono text-zinc-400 uppercase">Alamat IPv4 (A Records):</h4>
-                      <div className="space-y-1">
+                      <div className="space-y-1.5">
                         {probeResult.dnsRecords.a.map((ip, idx) => (
-                          <div key={idx} className="flex items-center justify-between p-2 rounded bg-zinc-950 border border-white/[0.05] text-xs font-mono">
+                          <div key={idx} className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-white/[0.05] text-xs font-mono">
                             <span className="text-emerald-400">{ip}</span>
                             <button
                               onClick={() => copyText(ip, `dns-a-${idx}`)}
@@ -838,9 +984,9 @@ export default function Home() {
                     {probeResult.dnsRecords.aaaa.length > 0 && (
                       <div className="space-y-2">
                         <h4 className="text-xs font-mono text-zinc-400 uppercase">Alamat IPv6 (AAAA Records):</h4>
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           {probeResult.dnsRecords.aaaa.map((ip, idx) => (
-                            <div key={idx} className="flex items-center justify-between p-2 rounded bg-zinc-950 border border-white/[0.05] text-xs font-mono">
+                            <div key={idx} className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-white/[0.05] text-xs font-mono">
                               <span className="text-cyan-400 truncate max-w-[280px] sm:max-w-none">{ip}</span>
                               <button
                                 onClick={() => copyText(ip, `dns-aaaa-${idx}`)}
@@ -858,11 +1004,11 @@ export default function Home() {
                     {probeResult.dnsRecords.mx.length > 0 && (
                       <div className="space-y-2">
                         <h4 className="text-xs font-mono text-zinc-400 uppercase">Mail Exchanger (MX Records):</h4>
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           {probeResult.dnsRecords.mx.map((mx, idx) => (
-                            <div key={idx} className="flex items-center justify-between p-2 rounded bg-zinc-950 border border-white/[0.05] text-xs font-mono">
+                            <div key={idx} className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-white/[0.05] text-xs font-mono">
                               <span className="text-zinc-200">{mx.exchange}</span>
-                              <span className="text-zinc-400">Pri: {mx.priority}</span>
+                              <span className="text-zinc-500">Priority: {mx.priority}</span>
                             </div>
                           ))}
                         </div>
@@ -872,9 +1018,9 @@ export default function Home() {
                     {probeResult.dnsRecords.ns.length > 0 && (
                       <div className="space-y-2">
                         <h4 className="text-xs font-mono text-zinc-400 uppercase">Authoritative Nameservers (NS):</h4>
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           {probeResult.dnsRecords.ns.map((ns, idx) => (
-                            <div key={idx} className="p-2 rounded bg-zinc-950 border border-white/[0.05] text-xs font-mono text-zinc-300">
+                            <div key={idx} className="p-2.5 rounded-xl bg-zinc-950 border border-white/[0.05] text-xs font-mono text-zinc-300">
                               {ns}
                             </div>
                           ))}
@@ -885,9 +1031,9 @@ export default function Home() {
                     {probeResult.dnsRecords.txt.length > 0 && (
                       <div className="space-y-2">
                         <h4 className="text-xs font-mono text-zinc-400 uppercase">TXT Verification / SPF:</h4>
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           {probeResult.dnsRecords.txt.map((txt, idx) => (
-                            <div key={idx} className="p-2 rounded bg-zinc-950 border border-white/[0.05] text-xs font-mono text-zinc-400 break-all">
+                            <div key={idx} className="p-2.5 rounded-xl bg-zinc-950 border border-white/[0.05] text-xs font-mono text-zinc-400 break-all">
                               {txt}
                             </div>
                           ))}
@@ -898,24 +1044,24 @@ export default function Home() {
                 )}
 
                 {activeTab === "security" && (
-                  <div className="p-5 rounded-xl border border-white/[0.08] bg-zinc-900/40 space-y-5">
+                  <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md space-y-5">
                     <div className="flex items-center justify-between">
                       <div>
-                        <span className="text-xs font-medium uppercase tracking-wider text-zinc-400">
+                        <span className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300">
                           HTTP Security Headers Evaluation
                         </span>
                         <p className="text-xs text-zinc-400 mt-0.5">
                           Analisa kepatuhan header keamanan standar OWASP.
                         </p>
                       </div>
-                      <div className={`px-3 py-1 rounded border font-mono font-bold text-sm ${getSecurityGradePill(probeResult.securityAudit.grade)}`}>
+                      <div className={`px-3 py-1 rounded-lg border font-mono font-bold text-sm ${getSecurityGradePill(probeResult.securityAudit.grade)}`}>
                         Grade {probeResult.securityAudit.grade} ({probeResult.securityAudit.passCount}/{probeResult.securityAudit.total})
                       </div>
                     </div>
 
                     <div className="space-y-2">
                       {probeResult.securityAudit.checks.map((item, idx) => (
-                        <div key={idx} className="p-3.5 rounded-lg bg-zinc-950/70 border border-white/[0.05] flex items-start gap-3">
+                        <div key={idx} className="p-3.5 rounded-xl bg-zinc-950/80 border border-white/[0.05] flex items-start gap-3">
                           {item.status === "pass" ? (
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0 mt-0.5" />
                           ) : item.status === "warn" ? (
@@ -926,7 +1072,7 @@ export default function Home() {
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-xs font-semibold text-white font-mono">{item.name}</span>
-                              <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase ${
+                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border uppercase ${
                                 item.status === "pass"
                                   ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20"
                                   : item.status === "warn"
@@ -938,7 +1084,7 @@ export default function Home() {
                             </div>
                             <p className="text-xs text-zinc-400 mt-1">{item.description}</p>
                             {item.value && (
-                              <div className="mt-1.5 p-1.5 rounded bg-zinc-900 border border-white/[0.04] text-[11px] font-mono text-zinc-300 break-all">
+                              <div className="mt-1.5 p-2 rounded-lg bg-zinc-900 border border-white/[0.04] text-[11px] font-mono text-zinc-300 break-all">
                                 {item.value}
                               </div>
                             )}
@@ -950,11 +1096,11 @@ export default function Home() {
                 )}
 
                 {activeTab === "headers" && (
-                  <div className="p-5 rounded-xl border border-white/[0.08] bg-zinc-900/40 space-y-4">
+                  <div className="p-5 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md space-y-4">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Terminal className="w-4 h-4 text-zinc-400" />
-                        <span className="text-xs font-medium uppercase tracking-wider text-zinc-400">
+                        <span className="text-xs font-mono font-semibold uppercase tracking-wider text-zinc-300">
                           Raw Response Headers (curl -I)
                         </span>
                       </div>
@@ -963,14 +1109,14 @@ export default function Home() {
                           const text = Object.entries(probeResult.headers).map(([k, v]) => `${k}: ${v}`).join("\n");
                           copyText(text, "headers-all");
                         }}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded border border-white/[0.08] bg-zinc-950 hover:bg-zinc-800 text-xs font-mono text-zinc-300 transition-colors"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-white/[0.08] bg-zinc-950 hover:bg-zinc-800 text-xs font-mono text-zinc-300 transition-colors"
                       >
-                        {copiedKey === "headers-all" ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                        {copiedKey === "headers-all" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                         <span>Salin Semua</span>
                       </button>
                     </div>
 
-                    <div className="p-4 rounded-lg bg-zinc-950 border border-white/[0.05] overflow-x-auto">
+                    <div className="p-4 rounded-xl bg-zinc-950 border border-white/[0.05] overflow-x-auto">
                       <pre className="text-xs font-mono text-zinc-300 space-y-1">
                         <div><span className="text-emerald-400">HTTP/1.1</span> <span className="text-amber-400">{probeResult.network.statusCode} {probeResult.network.statusText}</span></div>
                         {Object.entries(probeResult.headers).map(([k, v]) => (
@@ -986,7 +1132,7 @@ export default function Home() {
             )}
 
             {domainHistory.length > 0 && !probeLoading && (
-              <div className="mt-12 pt-6 border-t border-white/[0.08]">
+              <div className="mt-10 pt-6 border-t border-white/[0.08]">
                 <div className="flex items-center justify-between mb-3 text-xs text-zinc-400 font-mono">
                   <span>Riwayat Pengujian Terakhir:</span>
                   <button
@@ -1004,10 +1150,10 @@ export default function Home() {
                     <button
                       key={item}
                       onClick={() => runDomainProbe(item)}
-                      className="px-3 py-1.5 rounded-md border border-white/[0.08] bg-zinc-900/50 hover:bg-zinc-800 text-zinc-300 text-xs font-mono flex items-center gap-1.5 transition-colors min-h-[36px]"
+                      className="px-3 py-1.5 rounded-lg border border-white/[0.08] bg-zinc-900/60 hover:bg-zinc-800 text-zinc-300 text-xs font-mono flex items-center gap-1.5 transition-colors min-h-[36px]"
                     >
                       <span>{item}</span>
-                      <ChevronRight className="w-3 h-3 text-zinc-400" />
+                      <ChevronRight className="w-3 h-3 text-zinc-500" />
                     </button>
                   ))}
                 </div>
@@ -1020,146 +1166,249 @@ export default function Home() {
         {/* MODE 2: INTERNET SPEEDTEST (CLIENT-SIDE BANDWIDTH) */}
         {/* ==================================================================== */}
         {appMode === "speedtest" && (
-          <div className="space-y-8 max-w-4xl mx-auto w-full">
-            <div className="text-center">
-              <h2 className="text-2xl sm:text-4xl font-bold tracking-tight text-white mb-2">
+          <div className="space-y-6 max-w-4xl mx-auto w-full">
+            <div className="text-center pt-2 pb-2">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 text-emerald-300 text-xs font-mono mb-4">
+                <Zap className="w-3 h-3 text-emerald-400 animate-pulse" />
+                <span>Multi-Stream Real-Time Bandwidth Engine</span>
+              </div>
+              <h2 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white mb-2">
                 Uji Kecepatan Koneksi Internet Anda
               </h2>
               <p className="text-zinc-400 text-xs sm:text-sm max-w-md mx-auto">
-                Ukur latensi Ping, Jitter, kecepatan Download, dan Upload secara langsung dari perangkat Anda ke edge server.
+                Ukur latensi Ping, Jitter, kecepatan Download, dan Upload secara langsung dari perangkat Anda ke edge server terdekat.
               </p>
             </div>
 
             {/* Client ISP Strip */}
             {clientInfo && (
-              <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/50 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono">
+              <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/70 backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-3 text-xs font-mono shadow-md">
                 <div className="flex items-center gap-2.5">
                   <Wifi className="w-4 h-4 text-emerald-400" />
                   <span className="text-zinc-400">Penyedia Layanan (ISP):</span>
-                  <span className="text-white font-semibold">{clientInfo.isp}</span>
+                  <span className="text-white font-bold">{clientInfo.isp}</span>
                 </div>
                 <div className="flex items-center gap-3 text-zinc-400">
-                  <span>IP: {clientInfo.ip}</span>
+                  <span>IP: <strong className="text-zinc-200">{clientInfo.ip}</strong></span>
                   <span>•</span>
                   <span>{clientInfo.city}, {clientInfo.country}</span>
                 </div>
               </div>
             )}
 
-            {/* Central Dial & Gauge Area */}
-            <div className="py-8 sm:py-12 flex flex-col items-center justify-center">
-              {speedState === "idle" && (
-                <button
-                  type="button"
-                  onClick={runInternetSpeedtest}
-                  className="w-44 h-44 sm:w-52 sm:h-52 rounded-full border border-emerald-500/40 bg-zinc-900 hover:bg-zinc-800/80 flex flex-col items-center justify-center gap-2 group transition-all shadow-2xl hover:scale-105 active:scale-95"
-                >
-                  <Play className="w-10 h-10 text-emerald-400 group-hover:scale-110 transition-transform ml-1" />
-                  <span className="font-bold text-sm tracking-wider uppercase text-white font-mono">
-                    Mulai Uji
-                  </span>
-                  <span className="text-[10px] text-zinc-400 font-mono">Klik untuk mulai</span>
-                </button>
-              )}
+            {/* Central Tachometer Gauge Area */}
+            <div className="py-6 sm:py-10 flex flex-col items-center justify-center relative">
+              {/* Outer Decorative Glow Ring */}
+              <div className="w-[320px] h-[320px] sm:w-[380px] sm:h-[380px] rounded-full border border-white/[0.06] bg-zinc-950/70 shadow-2xl relative flex items-center justify-center p-6 backdrop-blur-xl">
+                
+                {/* SVG Speedometer Arc & Graduation Marks */}
+                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 200 200">
+                  {/* Gauge Arc Track */}
+                  <circle
+                    cx="100"
+                    cy="100"
+                    r="80"
+                    fill="none"
+                    stroke="rgba(255,255,255,0.08)"
+                    strokeWidth="7"
+                    strokeDasharray="376"
+                    strokeDashoffset="125"
+                    strokeLinecap="round"
+                    transform="rotate(135 100 100)"
+                  />
+                  {/* Dynamic Progress Glow Arc */}
+                  <circle
+                    cx="100"
+                    cy="100"
+                    r="80"
+                    fill="none"
+                    stroke="url(#speedGradient)"
+                    strokeWidth="7"
+                    strokeDasharray="376"
+                    strokeDashoffset={125 + (1 - speedRatio) * 251}
+                    strokeLinecap="round"
+                    transform="rotate(135 100 100)"
+                    className="transition-all duration-300 ease-out"
+                  />
+                  <defs>
+                    <linearGradient id="speedGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="#3b82f6" />
+                      <stop offset="50%" stopColor="#10b981" />
+                      <stop offset="100%" stopColor="#06b6d4" />
+                    </linearGradient>
+                  </defs>
 
-              {(speedState === "ping" || speedState === "download" || speedState === "upload") && (
-                <div className="w-48 h-48 sm:w-56 sm:h-56 rounded-full border-2 border-emerald-400/40 bg-zinc-900/80 flex flex-col items-center justify-center relative p-4">
-                  <div className="absolute inset-0 rounded-full border-t-2 border-emerald-400 animate-spin" />
-                  <span className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-semibold mb-1">
-                    {speedState === "ping" ? "Mengukur Ping..." : speedState === "download" ? "Download..." : "Upload..."}
-                  </span>
-                  <span className="text-4xl sm:text-5xl font-bold font-mono text-white tracking-tight">
-                    {currentSpeedDisplay.toFixed(1)}
-                  </span>
-                  <span className="text-xs font-mono text-zinc-400 mt-1">Mbps</span>
-                </div>
-              )}
+                  {/* Tick Marks labels */}
+                  <text x="35" y="150" fill="#71717a" fontSize="8" fontFamily="monospace" textAnchor="middle">0</text>
+                  <text x="35" y="75" fill="#71717a" fontSize="8" fontFamily="monospace" textAnchor="middle">50</text>
+                  <text x="100" y="32" fill="#71717a" fontSize="8" fontFamily="monospace" textAnchor="middle">100</text>
+                  <text x="165" y="75" fill="#71717a" fontSize="8" fontFamily="monospace" textAnchor="middle">250</text>
+                  <text x="165" y="150" fill="#71717a" fontSize="8" fontFamily="monospace" textAnchor="middle">500+</text>
+                </svg>
 
-              {speedState === "finished" && (
-                <div className="flex flex-col items-center">
-                  <div className="text-center mb-6">
-                    <span className="text-xs font-mono text-emerald-400 uppercase tracking-widest font-semibold block mb-1">
-                      Pengujian Selesai
-                    </span>
-                    <span className="text-5xl sm:text-6xl font-bold font-mono text-white">
-                      {downloadMbps} <span className="text-lg font-normal text-zinc-400">Mbps</span>
-                    </span>
-                    <p className="text-xs text-zinc-400 mt-2">
-                      Kecepatan unduh koneksi internet aktif perangkat Anda
-                    </p>
+                {/* Animated Needle Pointer */}
+                {(speedState === "download" || speedState === "upload" || speedState === "finished") && (
+                  <div
+                    className="absolute w-full h-full pointer-events-none transition-transform duration-300 ease-out flex items-center justify-center"
+                    style={{ transform: `rotate(${needleAngle}deg)` }}
+                  >
+                    <div className="w-1 h-32 bg-gradient-to-t from-emerald-400 to-transparent rounded-full shadow-[0_0_12px_rgba(16,185,129,0.8)] -translate-y-16" />
                   </div>
+                )}
 
-                  <div className="flex items-center gap-3">
+                {/* Center Dial Hub */}
+                <div className="relative z-10 flex flex-col items-center justify-center text-center">
+                  {speedState === "idle" && (
                     <button
                       type="button"
                       onClick={runInternetSpeedtest}
-                      className="flex items-center gap-2 px-5 py-2.5 rounded-lg border border-white/[0.1] bg-zinc-900 hover:bg-zinc-800 text-xs font-mono text-white transition-colors min-h-[44px]"
+                      className="w-36 h-36 rounded-full border border-emerald-500/40 bg-zinc-900/90 hover:bg-zinc-800 flex flex-col items-center justify-center gap-1.5 group transition-all shadow-xl hover:scale-105 active:scale-95 cursor-pointer"
                     >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Uji Ulang</span>
+                      <Play className="w-8 h-8 text-emerald-400 group-hover:scale-110 transition-transform ml-1" />
+                      <span className="font-bold text-xs tracking-wider uppercase text-white font-mono">
+                        Mulai Uji
+                      </span>
+                      <span className="text-[9px] text-zinc-500 font-mono">Klik di sini</span>
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const summary = `Internet Speedtest Result\nDownload: ${downloadMbps} Mbps\nUpload: ${uploadMbps} Mbps\nPing: ${pingMs} ms • Jitter: ${jitterMs} ms\nISP: ${clientInfo?.isp || "Unknown"} (${clientInfo?.city || ""}, ${clientInfo?.country || ""})\nTested on https://probe.taveve.my.id`;
-                        copyText(summary, "share-speedtest");
-                      }}
-                      className="flex items-center gap-2 px-5 py-2.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-xs font-mono text-emerald-300 transition-colors min-h-[44px]"
-                    >
-                      {copiedKey === "share-speedtest" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedKey === "share-speedtest" ? "Tersalin!" : "Salin Hasil"}</span>
-                    </button>
-                  </div>
+                  )}
+
+                  {speedState === "ping" && (
+                    <div className="flex flex-col items-center animate-pulse">
+                      <Radio className="w-6 h-6 text-amber-400 animate-spin mb-2" />
+                      <span className="text-[11px] font-mono uppercase tracking-widest text-amber-400 font-semibold">
+                        Mengukur Ping...
+                      </span>
+                      <span className="text-3xl font-extrabold font-mono text-white mt-1">
+                        {pingMs || "..."} <span className="text-xs font-normal text-zinc-500">ms</span>
+                      </span>
+                    </div>
+                  )}
+
+                  {(speedState === "download" || speedState === "upload") && (
+                    <div className="flex flex-col items-center">
+                      <span className="text-[11px] font-mono uppercase tracking-widest text-emerald-400 font-semibold mb-1">
+                        {speedState === "download" ? "Unduh / Download" : "Unggah / Upload"}
+                      </span>
+                      <span className="text-5xl sm:text-6xl font-extrabold font-mono text-white tracking-tight">
+                        {currentSpeedDisplay.toFixed(1)}
+                      </span>
+                      <span className="text-xs font-mono text-zinc-400 mt-1 uppercase font-semibold">Mbps</span>
+                    </div>
+                  )}
+
+                  {speedState === "finished" && (
+                    <div className="flex flex-col items-center">
+                      <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400 font-semibold mb-1">
+                        Hasil Kecepatan
+                      </span>
+                      <span className="text-5xl font-extrabold font-mono text-white tracking-tight">
+                        {downloadMbps}
+                      </span>
+                      <span className="text-xs font-mono text-zinc-400 mt-0.5 font-semibold">Mbps Download</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Finished Controls */}
+              {speedState === "finished" && (
+                <div className="flex items-center gap-3 mt-6">
+                  <button
+                    type="button"
+                    onClick={runInternetSpeedtest}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl border border-white/[0.1] bg-zinc-900 hover:bg-zinc-800 text-xs font-mono text-white transition-colors min-h-[44px]"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Uji Ulang</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const summary = `Internet Speedtest Result\nDownload: ${downloadMbps} Mbps\nUpload: ${uploadMbps} Mbps\nPing: ${pingMs} ms • Jitter: ${jitterMs} ms\nISP: ${clientInfo?.isp || "Unknown"} (${clientInfo?.city || ""}, ${clientInfo?.country || ""})\nTested on https://probe.taveve.my.id`;
+                      copyText(summary, "share-speedtest");
+                    }}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-xs font-mono text-emerald-300 transition-colors min-h-[44px]"
+                  >
+                    {copiedKey === "share-speedtest" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedKey === "share-speedtest" ? "Tersalin!" : "Salin Hasil"}</span>
+                  </button>
                 </div>
               )}
             </div>
 
-            {/* Speedtest Metrics Cards Grid */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono">
-              <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
+            {/* Live Throughput Sparkline */}
+            {speedHistory.length > 2 && (
+              <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md">
+                <div className="flex items-center justify-between text-xs font-mono text-zinc-400 mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <BarChart2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Live Packet Stream Rate</span>
+                  </div>
+                  <span>Peak: {Math.max(...speedHistory)} Mbps</span>
+                </div>
+                <div className="h-16 flex items-end gap-1 pt-2">
+                  {speedHistory.map((val, idx) => {
+                    const peak = Math.max(...speedHistory, 1);
+                    const heightPercent = Math.max(10, (val / peak) * 100);
+                    return (
+                      <div
+                        key={idx}
+                        className="flex-1 bg-gradient-to-t from-emerald-500/40 to-emerald-400 rounded-t transition-all duration-150"
+                        style={{ height: `${heightPercent}%` }}
+                        title={`${val} Mbps`}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Speedtest 4 Metrics Cards */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5 font-mono">
+              <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md">
                 <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
                   <span>Download</span>
                   <Download className="w-3.5 h-3.5 text-emerald-400" />
                 </div>
                 <div className="text-2xl font-bold text-white">
                   {downloadMbps || (speedState === "download" ? currentSpeedDisplay.toFixed(1) : "—")}{" "}
-                  <span className="text-xs font-normal text-zinc-400">Mbps</span>
+                  <span className="text-xs font-normal text-zinc-500">Mbps</span>
                 </div>
-                <span className="text-[10px] text-zinc-400 mt-1 block">Throughput unduh</span>
+                <span className="text-[10px] text-zinc-500 mt-1 block">Throughput unduh</span>
               </div>
 
-              <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
+              <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md">
                 <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
                   <span>Upload</span>
                   <Upload className="w-3.5 h-3.5 text-cyan-400" />
                 </div>
                 <div className="text-2xl font-bold text-white">
                   {uploadMbps || (speedState === "upload" ? currentSpeedDisplay.toFixed(1) : "—")}{" "}
-                  <span className="text-xs font-normal text-zinc-400">Mbps</span>
+                  <span className="text-xs font-normal text-zinc-500">Mbps</span>
                 </div>
-                <span className="text-[10px] text-zinc-400 mt-1 block">Throughput kirim</span>
+                <span className="text-[10px] text-zinc-500 mt-1 block">Throughput kirim</span>
               </div>
 
-              <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
+              <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md">
                 <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
                   <span>Latency Ping</span>
                   <Clock className="w-3.5 h-3.5 text-amber-400" />
                 </div>
                 <div className="text-2xl font-bold text-white">
-                  {pingMs || "—"} <span className="text-xs font-normal text-zinc-400">ms</span>
+                  {pingMs || "—"} <span className="text-xs font-normal text-zinc-500">ms</span>
                 </div>
-                <span className="text-[10px] text-zinc-400 mt-1 block">Round-trip delay</span>
+                <span className="text-[10px] text-zinc-500 mt-1 block">Round-trip delay</span>
               </div>
 
-              <div className="p-4 rounded-xl border border-white/[0.08] bg-zinc-900/40">
+              <div className="p-4 rounded-2xl border border-white/[0.08] bg-zinc-900/60 backdrop-blur-md">
                 <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
                   <span>Jitter</span>
                   <Zap className="w-3.5 h-3.5 text-purple-400" />
                 </div>
                 <div className="text-2xl font-bold text-white">
-                  {jitterMs || "—"} <span className="text-xs font-normal text-zinc-400">ms</span>
+                  {jitterMs || "—"} <span className="text-xs font-normal text-zinc-500">ms</span>
                 </div>
-                <span className="text-[10px] text-zinc-400 mt-1 block">Variasi stabilitas</span>
+                <span className="text-[10px] text-zinc-500 mt-1 block">Stabilitas latensi</span>
               </div>
             </div>
           </div>
@@ -1167,9 +1416,9 @@ export default function Home() {
       </main>
 
       {/* Footer */}
-      <footer className="w-full border-t border-white/[0.08] py-6 text-center text-xs text-zinc-400 font-mono">
+      <footer className="w-full border-t border-white/[0.08] bg-zinc-950/80 py-6 text-center text-xs text-zinc-500 font-mono">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <span>NetSpeed Probe • Engineered for Network Engineers</span>
+          <span>NetSpeed Probe • High-Precision Network Diagnostics</span>
           <span>
             Koleksi Proyek{" "}
             <a

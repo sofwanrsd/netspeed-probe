@@ -1,6 +1,10 @@
 {
   "name": "netspeed-probe",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "High-Precision Domain & Network Diagnostic Tool",
+  "bin": {
+    "netspeed-probe": "./bin/cli.mjs"
+  },
   "private": true,
   "scripts": {
     "dev": "next dev",

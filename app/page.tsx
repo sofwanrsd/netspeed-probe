@@ -529,6 +529,17 @@ export default function Home() {
                         {probeResult.cdn.name} {probeResult.cdn.pop ? `(${probeResult.cdn.pop})` : ""}
                       </span>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const summary = `NetSpeed Probe Diagnostic\nTarget: ${probeResult.target.hostname} (${probeResult.target.ip})\nRTT: ${probeResult.timings.total_ms}ms • TTFB: ${probeResult.timings.ttfb_ms}ms • Download: ${probeResult.network.speedMbps} Mbps\nDNS: ${probeResult.timings.dns_ms}ms • CDN: ${probeResult.cdn.name} • Location: ${probeResult.geo.city}, ${probeResult.geo.country}\nTested on https://probe.taveve.my.id`;
+                        copyText(summary, "share-domain");
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-white/[0.08] bg-zinc-950 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors text-xs font-mono flex items-center gap-1.5 min-h-[36px]"
+                    >
+                      {copiedKey === "share-domain" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedKey === "share-domain" ? "Tersalin!" : "Bagikan"}</span>
+                    </button>
                     <a
                       href={probeResult.target.url}
                       target="_blank"
@@ -1078,14 +1089,27 @@ export default function Home() {
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={runInternetSpeedtest}
-                    className="flex items-center gap-2 px-5 py-2.5 rounded-lg border border-white/[0.1] bg-zinc-900 hover:bg-zinc-800 text-xs font-mono text-white transition-colors"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Uji Ulang</span>
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={runInternetSpeedtest}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-lg border border-white/[0.1] bg-zinc-900 hover:bg-zinc-800 text-xs font-mono text-white transition-colors min-h-[44px]"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span>Uji Ulang</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const summary = `Internet Speedtest Result\nDownload: ${downloadMbps} Mbps\nUpload: ${uploadMbps} Mbps\nPing: ${pingMs} ms • Jitter: ${jitterMs} ms\nISP: ${clientInfo?.isp || "Unknown"} (${clientInfo?.city || ""}, ${clientInfo?.country || ""})\nTested on https://probe.taveve.my.id`;
+                        copyText(summary, "share-speedtest");
+                      }}
+                      className="flex items-center gap-2 px-5 py-2.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-xs font-mono text-emerald-300 transition-colors min-h-[44px]"
+                    >
+                      {copiedKey === "share-speedtest" ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copiedKey === "share-speedtest" ? "Tersalin!" : "Salin Hasil"}</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

@@ -236,7 +236,7 @@ export async function GET(req: NextRequest) {
         const ts = tls.connect({
           socket: rawSocket,
           servername: hostname,
-          ALPNProtocols: ["h2", "http/1.1"],
+          ALPNProtocols: ["http/1.1"],
           rejectUnauthorized: false
         }, () => resolve(ts));
         ts.setTimeout(8000, () => {
@@ -280,8 +280,9 @@ export async function GET(req: NextRequest) {
     const reqHeaders = [
       `GET ${requestPath} HTTP/1.1`,
       `Host: ${hostname}`,
-      `User-Agent: NetSpeedProbe/2.0 (Engineering Diagnostic; +https://github.com/sofwanrsd)`,
+      `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
       `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8`,
+      `Accept-Language: id,en-US;q=0.9,en;q=0.8`,
       `Connection: close`,
       ``,
       ``

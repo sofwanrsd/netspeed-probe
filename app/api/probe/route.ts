@@ -17,24 +17,25 @@ function isPrivateIP(ip: string): boolean {
   return false;
 }
 
-function detectCDN(headers: Record<string, string>, server: string): { name: string; detected: boolean } {
+function detectCDN(headers: Record<string, string>, server: string): { name: string; detected: boolean; pop?: string } {
   const s = server.toLowerCase();
   const h = headers;
 
   if (s.includes("cloudflare") || h["cf-ray"] || h["cf-cache-status"]) {
-    return { name: "Cloudflare", detected: true };
+    const pop = h["cf-ray"] ? h["cf-ray"].split("-")[1] : undefined;
+    return { name: "Cloudflare", detected: true, pop };
   }
   if (h["x-amz-cf-id"] || h["x-amz-cf-pop"] || s.includes("cloudfront")) {
-    return { name: "Amazon CloudFront", detected: true };
+    return { name: "Amazon CloudFront", detected: true, pop: h["x-amz-cf-pop"] };
   }
   if (s.includes("akamaighost") || h["x-akamai-transformed"]) {
     return { name: "Akamai", detected: true };
   }
   if (h["x-served-by"] || h["fastly-restarts"] || s.includes("fastly")) {
-    return { name: "Fastly", detected: true };
+    return { name: "Fastly", detected: true, pop: h["x-served-by"] };
   }
   if (h["x-vercel-id"] || s.includes("vercel")) {
-    return { name: "Vercel Edge Network", detected: true };
+    return { name: "Vercel Edge Network", detected: true, pop: h["x-vercel-id"]?.split(":")[0] };
   }
   if (h["x-nf-request-id"] || s.includes("netlify")) {
     return { name: "Netlify Edge", detected: true };
@@ -44,6 +45,69 @@ function detectCDN(headers: Record<string, string>, server: string): { name: str
   }
 
   return { name: "Direct / Origin Server", detected: false };
+}
+
+function auditSecurityHeaders(headers: Record<string, string>) {
+  const checks: Array<{
+    name: string;
+    header: string;
+    status: "pass" | "warn" | "fail";
+    value?: string;
+    description: string;
+  }> = [
+    {
+      name: "Strict-Transport-Security (HSTS)",
+      header: "strict-transport-security",
+      status: headers["strict-transport-security"] ? "pass" : "fail",
+      value: headers["strict-transport-security"],
+      description: "Mencegah serangan Man-in-the-Middle (MITM) dengan memaksa koneksi HTTPS."
+    },
+    {
+      name: "Content-Security-Policy (CSP)",
+      header: "content-security-policy",
+      status: headers["content-security-policy"] ? "pass" : "warn",
+      value: headers["content-security-policy"] ? "Configured" : undefined,
+      description: "Melindungi dari Cross-Site Scripting (XSS) dan injeksi data berbahaya."
+    },
+    {
+      name: "X-Frame-Options",
+      header: "x-frame-options",
+      status: headers["x-frame-options"] ? "pass" : "warn",
+      value: headers["x-frame-options"],
+      description: "Mencegah serangan Clickjacking dengan melarang iframe pihak ketiga."
+    },
+    {
+      name: "X-Content-Type-Options",
+      header: "x-content-type-options",
+      status: headers["x-content-type-options"]?.toLowerCase() === "nosniff" ? "pass" : "fail",
+      value: headers["x-content-type-options"],
+      description: "Mencegah MIME-sniffing yang dapat mengeksekusi payload tersembunyi."
+    },
+    {
+      name: "Referrer-Policy",
+      header: "referrer-policy",
+      status: headers["referrer-policy"] ? "pass" : "warn",
+      value: headers["referrer-policy"],
+      description: "Mengontrol seberapa banyak informasi referer URL yang dibagikan saat navigasi."
+    },
+    {
+      name: "Permissions-Policy",
+      header: "permissions-policy",
+      status: headers["permissions-policy"] ? "pass" : "warn",
+      value: headers["permissions-policy"] ? "Configured" : undefined,
+      description: "Membatasi akses fitur browser (kamera, mikrofon, geolokasi) oleh skrip."
+    }
+  ];
+
+  const passCount = checks.filter(c => c.status === "pass").length;
+  let grade = "C";
+  if (passCount >= 5) grade = "A+";
+  else if (passCount === 4) grade = "A";
+  else if (passCount === 3) grade = "B";
+  else if (passCount === 2) grade = "C";
+  else grade = "D";
+
+  return { grade, passCount, total: checks.length, checks };
 }
 
 async function getGeoInfo(ip: string) {
@@ -64,13 +128,13 @@ async function getGeoInfo(ip: string) {
           org: data.org || "Unknown",
           as: data.as || "Unknown",
           timezone: data.timezone || "UTC",
-          lat: data.lat,
-          lon: data.lon
+          lat: data.lat || 0,
+          lon: data.lon || 0
         };
       }
     }
   } catch {
-    // Ignore geo fallback
+    // Ignore fallback
   }
   return {
     country: "Unknown",
@@ -112,10 +176,22 @@ export async function GET(req: NextRequest) {
   const requestPath = (parsedUrl.pathname || "/") + (parsedUrl.search || "");
 
   try {
-    // Phase 1: DNS Resolution
+    // Phase 1: Exhaustive DNS Matrix Lookup
     const dnsStart = performance.now();
-    const addresses = await dns.resolve4(hostname);
+    const [aResult, aaaaResult, mxResult, txtResult, nsResult] = await Promise.allSettled([
+      dns.resolve4(hostname),
+      dns.resolve6(hostname),
+      dns.resolveMx(hostname),
+      dns.resolveTxt(hostname),
+      dns.resolveNs(hostname)
+    ]);
     const dnsDuration = performance.now() - dnsStart;
+
+    const addresses = aResult.status === "fulfilled" ? aResult.value : [];
+    const aaaaAddresses = aaaaResult.status === "fulfilled" ? aaaaResult.value : [];
+    const mxRecords = mxResult.status === "fulfilled" ? mxResult.value : [];
+    const txtRecords = txtResult.status === "fulfilled" ? txtResult.value.map(t => t.join(" ")) : [];
+    const nsRecords = nsResult.status === "fulfilled" ? nsResult.value : [];
 
     if (!addresses || addresses.length === 0) {
       return NextResponse.json({ error: `Gagal meresolve alamat IP untuk host ${hostname}` }, { status: 502 });
@@ -128,7 +204,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Target alamat IP private/internal diblokir demi keamanan." }, { status: 403 });
     }
 
-    // Phase 2: TCP Connection
+    // Phase 2: TCP Socket Connection
     const tcpStart = performance.now();
     const rawSocket = await new Promise<net.Socket>((resolve, reject) => {
       const s = net.createConnection({ host: primaryIp, port: port }, () => resolve(s));
@@ -140,11 +216,12 @@ export async function GET(req: NextRequest) {
     });
     const tcpDuration = performance.now() - tcpStart;
 
-    // Phase 3: TLS Handshake (if HTTPS)
+    // Phase 3: TLS/SSL Handshake & ALPN
     let tlsDuration = 0;
     let tlsInfo: {
       version: string;
       cipher: string;
+      alpnProtocol: string;
       certSubject: string;
       certIssuer: string;
       certValidTo: string;
@@ -159,6 +236,7 @@ export async function GET(req: NextRequest) {
         const ts = tls.connect({
           socket: rawSocket,
           servername: hostname,
+          ALPNProtocols: ["h2", "http/1.1"],
           rejectUnauthorized: false
         }, () => resolve(ts));
         ts.setTimeout(8000, () => {
@@ -173,6 +251,7 @@ export async function GET(req: NextRequest) {
       const cert = tlsSocket.getPeerCertificate();
       const protocol = tlsSocket.getProtocol() || "Unknown";
       const cipher = tlsSocket.getCipher()?.name || "Unknown";
+      const alpn = (tlsSocket as any).alpnProtocol || "http/1.1";
 
       let daysRemaining = 0;
       if (cert.valid_to) {
@@ -188,6 +267,7 @@ export async function GET(req: NextRequest) {
       tlsInfo = {
         version: protocol,
         cipher: cipher,
+        alpnProtocol: alpn,
         certSubject: formatField(cert.subject?.CN) || hostname,
         certIssuer: formatField(cert.issuer?.O) || formatField(cert.issuer?.CN) || "Unknown Issuer",
         certValidTo: cert.valid_to || "",
@@ -195,7 +275,7 @@ export async function GET(req: NextRequest) {
       };
     }
 
-    // Phase 4 & 5: HTTP Request, TTFB, and Transfer Speed
+    // Phase 4: HTTP Request & First Byte (TTFB)
     const httpStart = performance.now();
     const reqHeaders = [
       `GET ${requestPath} HTTP/1.1`,
@@ -230,7 +310,7 @@ export async function GET(req: NextRequest) {
     const downloadDuration = Math.max(0.1, performance.now() - (httpStart + ttfb));
     const totalDuration = dnsDuration + tcpDuration + tlsDuration + ttfb + downloadDuration;
 
-    // Parse Response Header
+    // Response Headers Parsing
     const fullBuffer = Buffer.concat(chunks);
     const headerEndIndex = fullBuffer.indexOf("\r\n\r\n");
     let statusCode = 200;
@@ -262,12 +342,14 @@ export async function GET(req: NextRequest) {
       // Ignore
     }
 
-    // Phase 6: Geolocation & ASN Analysis
-    const geo = await getGeoInfo(primaryIp);
-    const cdn = detectCDN(respHeaders, respHeaders["server"] || "");
+    // Geolocation, CDN, and Security Audit
+    const [geo, cdn, securityAudit] = await Promise.all([
+      getGeoInfo(primaryIp),
+      Promise.resolve(detectCDN(respHeaders, respHeaders["server"] || "")),
+      Promise.resolve(auditSecurityHeaders(respHeaders))
+    ]);
 
     // Throughput Calculation
-    // speed in KB/s and Mbps
     const speedKBps = (totalBytes / 1024) / (downloadDuration / 1000);
     const speedMbps = (speedKBps * 8) / 1024;
 
@@ -289,6 +371,13 @@ export async function GET(req: NextRequest) {
         download_ms: Number(downloadDuration.toFixed(2)),
         total_ms: Number(totalDuration.toFixed(2))
       },
+      dnsRecords: {
+        a: addresses,
+        aaaa: aaaaAddresses,
+        mx: mxRecords,
+        txt: txtRecords,
+        ns: nsRecords
+      },
       network: {
         totalBytes: totalBytes,
         speedKBps: Number(speedKBps.toFixed(2)),
@@ -298,6 +387,8 @@ export async function GET(req: NextRequest) {
         contentType: respHeaders["content-type"] || "unknown",
         serverHeader: respHeaders["server"] || "Hidden / Unspecified"
       },
+      headers: respHeaders,
+      securityAudit: securityAudit,
       tls: tlsInfo,
       cdn: cdn,
       geo: geo,
